@@ -1,0 +1,46 @@
+AllCops:
+  TargetRubyVersion: 3.1
+  NewCops: enable
+  SuggestExtensions: false
+
+# The explanations in this gem are the point of it — a mechanism comment that
+# cites the RFC is worth more than a short method.
+Metrics:
+  Enabled: false
+
+Layout/LineLength:
+  Max: 120
+  AllowedPatterns:
+    - '^\s*#'
+
+Style/Documentation:
+  Enabled: false
+
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: double_quotes
+
+Naming/MethodParameterName:
+  AllowedNames:
+    - a
+    - b
+
+Style/TrailingCommaInHashLiteral:
+  EnforcedStyleForMultiline: consistent_comma
+
+Style/TrailingCommaInArrayLiteral:
+  EnforcedStyleForMultiline: consistent_comma
+
+# Keep stubbed DNS zones readable: a hash argument indents from the line start,
+# not from the paren column.
+Layout/FirstHashElementIndentation:
+  EnforcedStyle: consistent
+
+Layout/FirstArrayElementIndentation:
+  EnforcedStyle: consistent
+
+# `%{i}` in an SPF record is a macro (RFC 7208 §7), not a format string.
+Style/FormatStringToken:
+  Enabled: false
