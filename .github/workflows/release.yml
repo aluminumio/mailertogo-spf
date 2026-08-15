@@ -1,0 +1,61 @@
+# Publish to RubyGems via trusted publishing (OIDC) — no API key, no OTP.
+#
+# RubyGems mints a short-lived credential for this exact workflow, in this exact
+# repo, at run time. There is no long-lived secret in the repo, in Actions, or in
+# anyone's password manager, so there is nothing to leak or rotate. It also means
+# a release is always reproducible from a tag rather than from whichever laptop
+# happened to run `gem push`.
+#
+# ONE-TIME SETUP (a human, once, in the RubyGems UI):
+#   1. Sign in at https://rubygems.org and open your profile → Trusted Publishers.
+#   2. Add a GitHub Actions publisher:
+#        Repository : aluminumio/mailertogo-spf
+#        Workflow   : release.yml
+#        Environment: rubygems            (must match the `environment:` below)
+#   3. For the FIRST release of a brand-new gem name, RubyGems needs the gem to
+#      exist or the publisher to be registered as a "pending" trusted publisher —
+#      the UI offers this explicitly for gems that have never been pushed.
+#
+# TO RELEASE: bump the version, update CHANGELOG.md, then push a tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      contents: read
+      # The OIDC token this job exchanges with RubyGems for a short-lived
+      # credential. Without it there is nothing to authenticate with.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      # Publish only what has been proven. A tag that fails its own suite must
+      # not reach RubyGems, where a version number can be yanked but never reused.
+      - name: Run the specs
+        run: bundle exec rspec
+
+      - name: Verify the tag matches the gemspec version
+        run: |
+          gem_version="$(ruby -e 'puts Gem::Specification.load("mailertogo-spf.gemspec").version')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$gem_version" != "$tag_version" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match gemspec version ${gem_version}" >&2
+            exit 1
+          fi
+
+      - uses: rubygems/release-gem@v1
