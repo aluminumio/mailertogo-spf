@@ -227,6 +227,22 @@ permerrors the whole evaluation rather than quietly doing nothing:
 ```ruby
 audit.targets_without_spf  # => ["nothing.example.net"]  — include: of a name with no SPF (§5.2)
 audit.duplicated_in_chain  # => ["two.example.net"]      — two v=spf1 records in the chain (§4.5)
+audit.apex_duplicated?     # => false                    — two at the hostname itself (§4.5)
+```
+
+`apex_duplicated?` is deliberately separate from `duplicated_in_chain`: the
+hostname is not *in* the chain, it is the record being priced. It answers `nil`
+— "cannot say" — when you supplied the `record:` yourself, because then we never
+looked at the apex. A caller that resolved the apex already knows, and should
+report from what it saw rather than ask twice.
+
+A record that does not exist cannot be priced, so `total` and `headroom` are
+`nil` rather than `0`. Check `published?` first:
+
+```ruby
+audit = MailerToGo::SPF.chain_audit("no-spf.example.com")
+audit.published?  # => false
+audit.total       # => nil   — not 0; `v=spf1 -all` legitimately costs 0
 ```
 
 Two honesty flags, because a count you could not finish must never read as "it

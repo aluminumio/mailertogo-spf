@@ -153,10 +153,39 @@ RSpec.describe MailerToGo::SPF::ChainAudit do
       expect(a.duplicated_in_chain).to eq(["two.example.net"])
     end
 
-    it "names the apex itself when it is the one publishing two records" do
+    # §4.5: "A domain... MUST NOT publish more than one version 1 SPF record",
+    # and §4.6 makes a second record a permerror. That applies to the apex and
+    # to a chain member alike — but the two are REPORTED separately, because the
+    # apex is not in the chain, it is the record being priced.
+    it "reports duplicates at the apex separately from duplicates in the chain" do
       a = audit({ "example.com" => ["v=spf1 ip4:203.0.113.1 ~all", "v=spf1 ip4:203.0.113.2 ~all"] })
 
-      expect(a.duplicated_in_chain).to eq(["example.com"])
+      expect(a.apex_duplicated?).to be(true)
+      expect(a.duplicated_in_chain).to be_empty
+    end
+
+    it "says the apex is not duplicated when it publishes exactly one record" do
+      a = audit({ "example.com" => ["v=spf1 ip4:203.0.113.1 ~all"] })
+
+      expect(a.apex_duplicated?).to be(false)
+    end
+
+    # The bug this replaced: with a record supplied, the apex was never added to
+    # duplicated_in_chain; resolving the apex ourselves, it was. So the same
+    # domain audited two ways disagreed, and a caller that raises its own
+    # duplicate-record defect from the records IT resolved would have raised it
+    # twice the moment it stopped passing `record:`. nil is "we never looked",
+    # which is a different fact from "there is only one".
+    it "cannot say whether the apex is duplicated when the record was handed to us" do
+      supplied = MailerToGo::SPF::ChainAudit.call(
+        hostname: "example.com",
+        record: "v=spf1 ip4:203.0.113.1 ~all",
+        resolver: resolver_for({ "example.com" => ["v=spf1 ip4:203.0.113.1 ~all",
+                                                   "v=spf1 ip4:203.0.113.2 ~all",] })
+      )
+
+      expect(supplied.apex_duplicated?).to be_nil
+      expect(supplied.duplicated_in_chain).to be_empty
     end
 
     it "does not walk a record that includes itself" do
@@ -198,7 +227,34 @@ RSpec.describe MailerToGo::SPF::ChainAudit do
 
       expect(a).to be_resolved
       expect(a).not_to be_published
+    end
+
+    # The bug this replaced: #total read 0 for a name with no record, so a
+    # caller that skipped #published? would report "this record costs 0
+    # lookups" about a domain that has none. 0 is a legitimate total — see the
+    # example below — which is exactly what makes it the wrong stand-in for
+    # "there is no answer".
+    it "cannot price a record that does not exist" do
+      a = audit({})
+
+      expect(a.total).to be_nil
+      expect(a.headroom).to be_nil
+      expect(a).not_to be_over_limit
+    end
+
+    it "still prices a record that legitimately costs nothing as 0" do
+      a = audit({ "example.com" => ["v=spf1 -all"] })
+
+      expect(a).to be_published
       expect(a.total).to eq(0)
+      expect(a.headroom).to eq(MailerToGo::SPF::ChainAudit::LIMIT)
+    end
+
+    it "cannot price, or say how much room is left, when DNS did not answer" do
+      a = audit({ "example.com" => nil })
+
+      expect(a.total).to be_nil
+      expect(a.headroom).to be_nil
     end
   end
 
