@@ -76,8 +76,25 @@ module MailerToGo
       end
 
       # The terms of a record, without the leading "v=spf1".
+      #
+      # Strings, deliberately: this is the raw-text layer, and the engine walks
+      # terms in tight loops where a string is exactly what it wants. Ask for
+      # .parse_terms when you want to interrogate a term rather than match it.
       def terms(record)
         record.to_s.split(/\s+/).drop(1)
+      end
+
+      # The same terms as Term objects, numbered from 1 in record order, so a
+      # caller can ask each one what it is instead of re-deriving that from the
+      # string. `term_class:` takes a Term subclass — that is the seam for
+      # hanging your own copy off a term without a parallel parser behind it.
+      #
+      # Term is resolved at call time rather than required at the top of this
+      # file: Term is built ON this module, and the raw-text layer should not
+      # have to know about the layer above it to hand one back.
+      def parse_terms(record, term_class: nil)
+        term_class ||= Term
+        terms(record).each_with_index.map { |raw, i| term_class.new(raw: raw, position: i + 1) }
       end
     end
   end
