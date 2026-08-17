@@ -124,8 +124,8 @@ module MailerToGo
       # record: price this record instead of resolving one at `hostname`, which
       # is how you price a record that is not published yet.
       def chain_audit(hostname, record: nil, resolver: nil, term_class: nil)
-        ChainAudit.call(record, hostname: hostname, resolver: resolver || self.resolver,
-                                term_class: term_class)
+        ChainAudit.call(hostname: hostname, record: record, resolver: resolver || self.resolver,
+                        term_class: term_class)
       end
 
       # Is this untrusted input something we should resolve at all? Returns the

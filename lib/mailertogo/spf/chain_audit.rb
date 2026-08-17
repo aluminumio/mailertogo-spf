@@ -60,11 +60,11 @@ module MailerToGo
       # resolver  — anything responding to #call(name); see Resolver.
       # term_class— a Term subclass to build the terms as, for a caller that
       #             hangs its own copy off a term.
-      def self.call(record = nil, hostname:, resolver:, term_class: nil)
-        new(record, hostname: hostname, resolver: resolver, term_class: term_class).run
+      def self.call(hostname:, resolver:, record: nil, term_class: nil)
+        new(hostname: hostname, resolver: resolver, record: record, term_class: term_class).run
       end
 
-      def initialize(record = nil, hostname:, resolver:, term_class: nil)
+      def initialize(hostname:, resolver:, record: nil, term_class: nil)
         @record = record&.to_s
         @hostname = Record.normalize_name(hostname)
         @resolver = resolver

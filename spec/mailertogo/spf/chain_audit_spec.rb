@@ -211,8 +211,8 @@ RSpec.describe MailerToGo::SPF::ChainAudit do
       end
 
       a = MailerToGo::SPF::ChainAudit.call(
-        "v=spf1 include:p1.example.net ~all",
         hostname: "example.com",
+        record: "v=spf1 include:p1.example.net ~all",
         resolver: resolver_for({ "p1.example.net" => ["v=spf1 ip4:203.0.113.1 ~all"] }),
         term_class: annotated
       )
