@@ -43,17 +43,13 @@ module MailerToGo
     # standalone instruction rather than guessing — better to under-help than to
     # tell someone to replace a record we could not read.
     class MergePlan
-      # A term that ends evaluation: `all`, with its optional qualifier, plus
-      # any junk glued onto it. The junk is real and surprisingly common —
-      # records ending `~all;google-site-verification=…` exist in the wild,
-      # where the `;`-joined fragment is not a valid SPF term at all.
-      ALL_TERM = /\A([+\-~?])?all([^a-z0-9].*)?\z/i
-
-      # A modifier (`redirect=`, `exp=`, or an unknown one) rather than a
-      # mechanism. Modifiers are position-independent (§4.6.1), so they survive
-      # the merge even when they trail the record's `all`.
-      MODIFIER_TERM = /\A([a-z][a-z0-9\-_.]*)=/i
-
+      # What a term IS — is it the terminal `all` (with whatever junk is glued
+      # onto it), is it a modifier, does it name the sender — is asked of Term
+      # rather than re-matched here. There was a second, informal copy of that
+      # knowledge in this file; two readings of the same term is exactly how a
+      # record ending `~all;google-site-verification=…` ends up merged one way
+      # and described another.
+      #
       # name          — the DNS name the record goes at.
       # record        — the standalone record you would otherwise have told them
       #                 to publish, e.g. Sender#record. It is what a :publish
@@ -138,26 +134,25 @@ module MailerToGo
         (theirs + ours).each do |record|
           seen_all = false
 
-          Record.terms(record).each do |term|
-            if (m = ALL_TERM.match(term))
+          Record.parse_terms(record).each do |term|
+            if term.all?
               seen_all = true
               # First `all` across the ordered records wins — theirs, not ours.
               # A bare `all` is `+all` (§4.6.2); spell it out so the merged line
               # says plainly what it does.
-              @all_qualifier ||= m[1] || "+"
-              if m[2] && !m[2].strip.empty?
-                @notes << "Dropped #{m[2].strip.inspect}, which was glued onto your #{m[1]}all " \
+              @all_qualifier ||= term.qualifier || "+"
+              if (junk = term.all_suffix)
+                @notes << "Dropped #{junk.inspect}, which was glued onto your #{term.qualifier}all " \
                           "and isn't a valid SPF term — publish it as its own TXT record if you still need it."
               end
               next
             end
 
-            if MODIFIER_TERM.match?(term)
+            if term.modifier
               # redirect=/exp= are modifiers, not mechanisms: they apply to the
               # whole record wherever they sit, so keep them (deduped by
               # modifier name).
-              key = MODIFIER_TERM.match(term)[1].downcase
-              modifiers << term unless modifiers.any? { |t| MODIFIER_TERM.match(t)[1].casecmp?(key) }
+              modifiers << term unless modifiers.any? { |t| t.modifier == term.modifier }
               next
             end
 
@@ -165,13 +160,14 @@ module MailerToGo
               # Unreachable in the published record (nothing after `all` is ever
               # evaluated). Dropping it preserves the record's exact behavior;
               # keeping it would newly authorize a sender receivers ignore today.
-              @notes << "Dropped #{term.inspect}, which sat after your #{@all_qualifier}all and was never evaluated."
+              @notes << "Dropped #{term.raw.inspect}, which sat after your #{@all_qualifier}all " \
+                        "and was never evaluated."
               next
             end
 
             next if sender_term?(term)
 
-            mechanisms << term unless mechanisms.any? { |t| t.casecmp?(term) }
+            mechanisms << term.raw unless mechanisms.any? { |t| t.casecmp?(term.raw) }
           end
         end
 
@@ -179,7 +175,7 @@ module MailerToGo
         # everything and ends evaluation.
         terms = mechanisms + ["include:#{@include_name}"]
         terms << "#{@all_qualifier}all" if @all_qualifier
-        terms += modifiers
+        terms += modifiers.map(&:raw)
         "v=spf1 #{terms.join(" ")}"
       end
 
@@ -208,13 +204,16 @@ module MailerToGo
       # that reaches the sender through somebody else's include is still THEIR
       # policy record.
       def ours?(record)
-        Record.terms(record).any? { |term| sender_term?(term) }
+        Record.parse_terms(record).any? { |term| sender_term?(term) }
       end
 
+      # Takes a Term, not a string: "does this name us" is a question about the
+      # term's target, and Term already knows how to find one.
       def sender_term?(term)
-        t = Record.strip_qualifier(term)
-        target = t[/\Ainclude:(.+)\z/i, 1] || t[/\Aredirect=(.+)\z/i, 1]
-        !target.nil? && !target.empty? && @sender.covers?(target)
+        return false unless term.include? || term.redirect?
+
+        target = term.target
+        !target.nil? && @sender.covers?(target)
       end
 
       def same_terms?(a, b)

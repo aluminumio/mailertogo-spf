@@ -2,6 +2,7 @@
 
 require "set"
 require "mailertogo/spf/record"
+require "mailertogo/spf/term"
 require "mailertogo/spf/result"
 require "mailertogo/spf/sender"
 
@@ -49,12 +50,13 @@ module MailerToGo
       # record.
       MAX_DEPTH = 10
 
-      # Mechanisms that consume one DNS lookup from the budget above.
-      QUERYING_MECHANISMS = %w[include a mx ptr exists].freeze
-
-      # RFC 7208 §4.6.2 — the qualifier on a mechanism, here only ever read off
-      # the record's terminal `all`. See Result#all_qualifier.
-      ALL_QUALIFIERS = { "+" => :pass, "-" => :fail, "~" => :softfail, "?" => :neutral }.freeze
+      # Mechanisms that consume one DNS lookup from the budget above, and the
+      # §4.6.2 qualifier map (here only ever read off the record's terminal
+      # `all` — see Result#all_qualifier). Both are RFC anatomy and live on
+      # Term, which is where a caller goes to ask what a term IS; named here
+      # because this is where they are spent.
+      QUERYING_MECHANISMS = Term::QUERYING
+      ALL_QUALIFIERS = Term::QUALIFIERS
 
       # hostname  — the domain whose SPF we are reading.
       # sender    — a Sender: the names that mean "me".

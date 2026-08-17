@@ -15,8 +15,10 @@ Gem::Specification.new do |spec|
     cap of 10 — so it agrees with what real receivers do instead of
     string-matching a token. It also plans the record a domain should publish:
     given what is already at the name, merge one include into the existing
-    record rather than adding a second v=spf1 record beside it. No Rails, no
-    runtime dependencies, injectable DNS resolver.
+    record rather than adding a second v=spf1 record beside it. And it prices a
+    record: what the whole tree costs a receiver that evaluates all of it, term
+    by term, against the same cap. No Rails, no runtime dependencies, injectable
+    DNS resolver.
   DESC
 
   spec.homepage = "https://github.com/aluminumio/mailertogo-spf"

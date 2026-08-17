@@ -23,6 +23,10 @@ stops at the first mechanism that matches (RFC 7208 §4.6.2), and counts
 DNS-querying terms against §4.6.4's cap of 10 — the same arithmetic a receiver
 does, so a record this gem passes is a record that passes in the wild.
 
+It answers three questions about a name: does its SPF **authorize** you, what
+should it **publish** given what is already there, and what does the record
+**cost** a receiver that evaluates all of it.
+
 No Rails. No runtime dependencies. DNS goes through an injectable resolver, so
 your test suite never touches the network.
 
@@ -173,6 +177,138 @@ plan.value_for(name: "example.com", value: "v=spf1 include:_spf.mailertogo.net ~
 # => "v=spf1 include:_spf.google.com include:_spf.mailertogo.net ~all"
 ```
 
+## What does this record cost?
+
+`authorize` counts the lookups spent up to the point where **you** match,
+because §4.6.2 ends a receiver's evaluation at the first matching mechanism.
+That is the right number for a gating decision and the wrong number for a page
+about the record itself, where the question is what the record costs a receiver
+that has to evaluate *all* of it — the number every other SPF checker reports.
+
+`chain_audit` walks the whole tree and prices it against the §4.6.4 budget of
+ten, attaching each cost to the term that incurred it:
+
+```ruby
+audit = MailerToGo::SPF.chain_audit("example.com")
+
+audit.total       # => 3
+audit.limit       # => 10
+audit.headroom    # => 7    — lookups still available before the cap
+audit.over_limit? # => false
+
+audit.terms.map { |t| [t.raw, t.lookups, t.running_total] }
+# => [["include:_spf.google.com", 3, 3],   # itself, plus the two includes inside it
+#     ["ip4:198.51.100.7",        0, 3],   # already an address; no DNS
+#     ["~all",                    0, 3]]
+```
+
+An `include:` costs one lookup **plus everything the record it pulls in costs**,
+which is why a record with three terms can be most of the way through the
+budget. That is the arithmetic people get wrong by hand, and the reason a
+domain that has added one provider too many cannot see it in the record.
+
+The two numbers can disagree about the same record, and both are right:
+
+```ruby
+# v=spf1 include:p1… ×8  include:relay.example.net  include:_spf.mailertogo.net ~all
+
+MailerToGo::SPF.authorize("example.com").lookups   # => 10 — a receiver matches you and stops
+MailerToGo::SPF.chain_audit("example.com").total   # => 11 — evaluating all of it costs 11
+```
+
+Your mail passes at every receiver today. The record is still over the cap, so
+everything listed *after* your include has already stopped passing, and the
+first person to add a provider breaks yours too. Report only the first number
+and you tell that domain owner their record is fine.
+
+The audit also names the defects it finds on the way down, each of which
+permerrors the whole evaluation rather than quietly doing nothing:
+
+```ruby
+audit.targets_without_spf  # => ["nothing.example.net"]  — include: of a name with no SPF (§5.2)
+audit.duplicated_in_chain  # => ["two.example.net"]      — two v=spf1 records in the chain (§4.5)
+```
+
+Two honesty flags, because a count you could not finish must never read as "it
+fits": `partial?` (part of the chain did not resolve) and `capped?` (the record
+is so far past the cap that we stopped resolving — 20 lookups and 200 are the
+same record to a receiver). Either one makes `total` a floor, and `headroom`
+returns `nil` rather than a reassuring number.
+
+Pass `record:` to price a line that is not published yet, and omit it to have
+the apex resolved for you:
+
+```ruby
+MailerToGo::SPF.chain_audit("example.com", record: "v=spf1 include:a.example.net include:b.example.net -all")
+```
+
+### Terms
+
+A `Term` is one term of a record, asked questions instead of pattern-matched:
+
+```ruby
+terms = MailerToGo::SPF::Record.parse_terms("v=spf1 include:_spf.mailertogo.net ~all;google-site-verification=abc")
+
+terms.first.mechanism          # => "include"
+terms.first.target             # => "_spf.mailertogo.net"
+terms.first.querying?          # => true — it spends from the §4.6.4 budget
+
+terms.last.all?                # => true — still a terminal `all`, junk and all
+terms.last.qualifier_meaning   # => :softfail
+terms.last.all_suffix          # => ";google-site-verification=abc"
+```
+
+That last one is the case worth having: records ending
+`~all;google-site-verification=…` are real and not rare, and reading the whole
+token as junk loses the record's `all` — and with it the domain's entire policy
+for unauthorized mail.
+
+There is deliberately **no English sentence** on a term. A description of what a
+term means is product voice; it belongs to whoever is writing to their own
+customers, in their own words. What the gem gives you instead is somewhere to
+put it — subclass `Term`, and both `Record.parse_terms` and `ChainAudit` will
+build and price yours:
+
+```ruby
+class AnnotatedTerm < MailerToGo::SPF::Term
+  def meaning
+    return "Everything else is marked, not rejected." if all? && qualifier == "~"
+    return "Applies #{target}'s own SPF record here." if include?
+
+    …
+  end
+end
+
+MailerToGo::SPF.chain_audit("example.com", term_class: AnnotatedTerm).terms.map(&:meaning)
+```
+
+## Untrusted input
+
+If the hostname came from a form, an API parameter or an uploaded file rather
+than from your own database, check it before you resolve anything: an SPF walk
+is recursive DNS performed on request.
+
+```ruby
+MailerToGo::SPF.normalize_hostname("https://WWW.Example.com/pricing?x=1")  # => "www.example.com"
+MailerToGo::SPF.normalize_hostname("billing@example.com")                  # => "example.com"
+MailerToGo::SPF.normalize_hostname("example.com:5353")                     # => "example.com"
+MailerToGo::SPF.normalize_hostname("v=spf1")                               # => nil
+MailerToGo::SPF.hostname?("192.0.2.1")                                     # => false
+```
+
+Forgiving about shape — people paste URLs and email addresses into a box
+labelled "domain" and are not wrong to expect that to work — and strict about
+the result: a syntactically valid hostname, or `nil`. A scheme, a port, a path,
+a query string or an address literal is stripped or refused before any resolver
+sees it, and there is no way to name a resolver or a port through it.
+
+It is a separate call rather than something folded into `authorize`, on purpose.
+"That is not a hostname" is a fact about your **input**; the statuses on
+`Result` are facts about somebody's **DNS**, and conflating the two would mean
+inventing a sixth status for a mistake DNS had nothing to do with. It is also
+not `Record.normalize_name`, which lowercases a name that came out of a record
+and never rejects.
+
 ## DNS
 
 A resolver is anything that responds to `#call(name)` and returns:
@@ -239,7 +375,7 @@ zone = {
 MailerToGo::SPF.authorize("example.com", resolver: ->(name) { zone.fetch(name, []) })
 ```
 
-The gem's own suite is built that way: 95 examples, zero network access.
+The gem's own suite is built that way: 137 examples, zero network access.
 
 ## Configuration
 

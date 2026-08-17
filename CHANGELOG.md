@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-17
+
+Answers a second question about a record: not only "does it authorize me, and
+what did that cost", but "what does it cost a receiver that has to evaluate all
+of it" — the number every other SPF checker reports, and the one a domain owner
+compares against.
+
+### Added
+
+- `MailerToGo::SPF.chain_audit` / `MailerToGo::SPF::ChainAudit` — prices a whole
+  record tree against the RFC 7208 §4.6.4 budget, term by term, with a running
+  total. Deliberately a different number from `Result#lookups`, which stops
+  where the receiver stops (§4.6.2): a record can authorize you at a cost of 10
+  while costing 11 overall and being broken for everyone listed after you.
+  Reports `over_limit?`, `headroom`, `partial?` (part of the chain did not
+  resolve, so the total is a floor) and `capped?` (past `CEILING`, where the
+  exact number stops changing what anyone should do), and names the chain
+  defects found on the way: `targets_without_spf` (§5.2) and
+  `duplicated_in_chain` (§4.5). Pass `record:` to price a record that is not
+  published yet, or omit it to have the apex resolved.
+- `MailerToGo::SPF::Term` — one term of a record as an immutable object that
+  answers questions (`include?`, `querying?`, `unreachable?`, `unknown?`,
+  `qualifier_meaning`, `all_suffix`, `kind`) instead of being re-matched at
+  every call site. Subclassable, and built through `term_class:` on both
+  `Record.parse_terms` and `ChainAudit`, so a consumer can hang its own
+  human-facing copy off a term without standing up a second parser behind it.
+- `Record.parse_terms(record, term_class:)` — a record's terms as `Term`s,
+  numbered from 1 in record order. `Record.terms` still returns strings.
+- `MailerToGo::SPF.normalize_hostname` / `.hostname?` (and
+  `MailerToGo::SPF::Hostname`) — the gate for untrusted input in front of
+  anything that resolves DNS on request. Forgiving about shape (a pasted URL,
+  an email address, a trailing dot), strict about the result: a syntactically
+  valid hostname, or nil. Distinct from `Record.normalize_name`, which
+  normalizes a name that came out of a record and never rejects.
+
+### Changed
+
+- The qualifier map, the querying-mechanism list, the modifier regex and the
+  `all`-with-junk regex are now defined once, on `Term`, and read from there by
+  `Authorization` and `MergePlan`. `Authorization::QUERYING_MECHANISMS` and
+  `ALL_QUALIFIERS` keep their names and values.
+- `MergePlan::ALL_TERM` and `MergePlan::MODIFIER_TERM` are removed; `MergePlan`
+  asks `Term` what a term is. Behaviour of the merge is unchanged.
+
 ## [0.1.0] - 2026-08-16
 
 First release. Extracted from the SPF engine MailerToGo runs behind its own
@@ -30,4 +74,5 @@ domain setup and monitoring.
   `Resolv::DNS` default and an optional `CachingResolver`. No runtime
   dependencies, no Rails.
 
+[0.2.0]: https://github.com/aluminumio/mailertogo-spf/releases/tag/v0.2.0
 [0.1.0]: https://github.com/aluminumio/mailertogo-spf/releases/tag/v0.1.0
