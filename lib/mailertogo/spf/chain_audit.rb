@@ -70,10 +70,12 @@ module MailerToGo
         @resolver = resolver
         @term_class = term_class || Term
         @spent = 0
-        @total = 0
+        @total = nil
         @terms = []
         @targets_without_spf = []
         @duplicated_in_chain = []
+        # nil until we resolve the apex ourselves — "cannot say", not "no".
+        @apex_duplicated = nil
         @resolved = true
         @partial = false
         @capped = false
@@ -100,7 +102,11 @@ module MailerToGo
           seen_all ||= term.all?
         end
 
-        @total = @spent
+        # nil, not 0, when there is nothing to price. 0 is a legitimate total —
+        # `v=spf1 -all` costs exactly that — so using it for "no record" lets a
+        # caller that skipped #published? report "this record costs 0 lookups"
+        # about a domain with no record at all.
+        @total = published? ? @spent : nil
         self
       end
 
@@ -128,10 +134,20 @@ module MailerToGo
       # the number is a floor — for a different reason.
       def capped? = @capped
 
+      # Was there more than one v=spf1 record at the hostname itself? §4.5 makes
+      # that a permerror just as surely as duplicates inside the chain.
+      #
+      # nil means "cannot say" rather than "no": the record was handed to us, so
+      # we never looked at the apex (or DNS did not answer). Only a caller that
+      # let us resolve the apex gets a true/false here — the one that resolved it
+      # already knows, and should report from what it saw rather than ask us.
+      def apex_duplicated? = @apex_duplicated
+
       # How many lookups are still available before the cap, or nil when we
-      # cannot say (a floor cannot answer "how much room is left").
+      # cannot say (a floor cannot answer "how much room is left", and neither
+      # can a record that does not exist).
       def headroom
-        return nil if partial? || capped?
+        return nil if partial? || capped? || !published?
 
         [LIMIT - @total.to_i, 0].max
       end
@@ -150,9 +166,14 @@ module MailerToGo
 
         records = Array(txts).map { |t| Record.normalize_txt(t) }.select { |t| Record.spf_record?(t) }
         # §4.5 — two records at the apex permerror the evaluation just as surely
-        # as two anywhere else in the chain, so they are noted the same way. We
-        # price the first, because there has to be something to read.
-        @duplicated_in_chain << @hostname if records.size > 1
+        # as two anywhere else in the chain. It is reported SEPARATELY from
+        # `duplicated_in_chain` even so, because the apex is not *in* the chain:
+        # it is the record being priced. Folding it in made the same domain audit
+        # differently depending on whether the caller resolved the apex or we
+        # did, and a caller that raises its own duplicate-record defect from the
+        # records it resolved would then raise it twice.
+        @apex_duplicated = records.size > 1
+        # We price the first, because there has to be something to read.
         @record = records.first.to_s
       end
 

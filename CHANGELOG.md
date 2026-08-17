@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-17
+
+Two `ChainAudit` results could be read as facts when they were really "we did
+not look". Both are corrected in the direction of admitting it.
+
+### Fixed
+
+- `ChainAudit#total` (and `#headroom`) are **`nil` rather than `0`** for a name
+  that publishes no record, or when DNS did not answer. `0` is a legitimate
+  total — `v=spf1 -all` costs exactly that — so a caller that skipped
+  `#published?` could report "this record costs 0 lookups" about a domain with
+  no record. A record that legitimately costs nothing still reports `0`.
+- Duplicate records **at the hostname itself** are reported by the new
+  `#apex_duplicated?` instead of being pushed onto `#duplicated_in_chain`. RFC
+  7208 §4.5 makes them a permerror either way, but the apex is not *in* the
+  chain — it is the record being priced. Folding them together made the same
+  domain audit differently depending on whether the caller supplied `record:` or
+  let the gem resolve the apex, and a caller raising its own duplicate-record
+  defect from the records it resolved would have raised it twice.
+
+### Added
+
+- `ChainAudit#apex_duplicated?` — `true`/`false` when the gem resolved the apex,
+  and `nil` ("cannot say") when the record was supplied or DNS did not answer.
+
+### Changed
+
+- `#duplicated_in_chain` no longer contains the audited hostname. Callers that
+  want that fact ask `#apex_duplicated?`.
+
 ## [0.2.0] - 2026-08-17
 
 Answers a second question about a record: not only "does it authorize me, and
