@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-18
+
+A hosted-SPF record that authorizes you per address was reported as `:fail`.
+It now passes, when the resolver can answer A queries.
+
+### Added
+
+- `exists:` terms that use `%{i}` are evaluated (RFC 7208 §5.7, §7). `%{i}`
+  expands to each of the sender's own addresses, one per net in its leaf record
+  (a single address is itself, a range is its first host), and the record
+  authorizes the sender only if it answers for all of them. `%{d}`, `%{o}`,
+  `%{v}`, digit and `r` transformers, and delimiters expand too. A macro that
+  needs a message (`%{s}`, `%{l}`, `%{h}`, `%{p}`) still leaves the term
+  unevaluated. The term still costs one lookup.
+- Optional resolver method `#a(name)`: A records, with the same `[]` / `nil`
+  contract as `#call`. `Resolver` implements it, and `CachingResolver` passes it
+  through (and caches it) only when the resolver it wraps has it.
+- `MailerToGo::SPF::Macro` — the §7 expansion above, as a pure function.
+
+### Unchanged
+
+- A resolver without `#a` (a lambda, for instance) gets exactly the 0.2.1
+  results. A failed A lookup gives `:unknown`, never `:fail`.
+
 ## [0.2.1] - 2026-08-17
 
 Two `ChainAudit` results could be read as facts when they were really "we did

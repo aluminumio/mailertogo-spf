@@ -343,6 +343,31 @@ gem has no runtime dependencies:
 MailerToGo::SPF::Resolver.new(timeout: 3, nameservers: %w[1.1.1.1 8.8.8.8])
 ```
 
+A resolver may also answer A queries, through `#a(name)` with the same
+three-way return (address strings, `[]`, or `nil`). The default resolver does.
+That is what lets the gem evaluate an `exists:` term, which RFC 7208 §5.7
+makes an A query. A resolver without `#a` is not wrong, only TXT-only:
+`exists:` then costs a lookup and matches nothing, as before.
+
+It matters for hosted SPF. Some services give each customer one include, and
+that record answers per connecting address against the service's own zone,
+so your include is never named anywhere:
+
+```
+example.com          TXT  v=spf1 include:abc123.powerspf.com ~all
+abc123.powerspf.com  TXT  v=spf1 exists:%{i}.abc123.macrospf.powerspf.com ~all
+```
+
+Receivers pass you. With `#a`, the gem expands `%{i}` to your own sending
+addresses (read from your leaf record, one per net: a single address is
+itself, a range is its first host) and asks. The record authorizes you only if
+it answers for **all** of them, because mail leaves from every one. `%{d}`,
+`%{o}`, `%{v}` and the digit and `r` transformers expand too. A macro that needs
+a message (`%{s}`, `%{l}`, `%{h}`, `%{p}`) cannot be expanded, and that term is
+left as before. A failed A lookup gives `:unknown`, never `:fail`. Only a `+`
+`exists:` that uses `%{i}` counts: one without `%{i}` answers the same for
+every sender.
+
 Resolving a chain is up to ten serial round-trips, which is not something to do
 twice in a request path, so there is a TTL cache. Failures are deliberately not
 cached — caching a timeout would pin a healthy domain into `:unknown` for the
@@ -376,6 +401,7 @@ DOH = lambda do |name|
 rescue StandardError
   nil
 end
+# For exists:, the same request with type=A, keeping type 1 answers, as DOH.a(name).
 
 MailerToGo::SPF.authorize("example.com", resolver: DOH)
 ```
@@ -391,7 +417,7 @@ zone = {
 MailerToGo::SPF.authorize("example.com", resolver: ->(name) { zone.fetch(name, []) })
 ```
 
-The gem's own suite is built that way: 137 examples, zero network access.
+The gem's own suite is built that way: 160 examples, zero network access.
 
 ## Configuration
 
