@@ -29,6 +29,16 @@ module ZoneHelper
     merged = SENDER_ZONE.merge(zone)
     ->(name) { merged.key?(name) ? merged[name] : [] }
   end
+
+  # The same stub DNS, also answering A queries (Resolver#a) from
+  # { name => [addresses] }, with the same missing-key / nil conventions.
+  def resolver_with_a(zone, a_zone)
+    txt = resolver_for(zone)
+    Object.new.tap do |r|
+      r.define_singleton_method(:call) { |name| txt.call(name) }
+      r.define_singleton_method(:a) { |name| a_zone.key?(name) ? a_zone[name] : [] }
+    end
+  end
 end
 
 RSpec.configure { |config| config.include ZoneHelper }

@@ -20,6 +20,12 @@ module MailerToGo
     # authorise you". Everything in this gem funnels a nil into an :unknown
     # result rather than a :fail.
     #
+    # Optionally, a resolver may also respond to `#a(name)` with the same
+    # three-way return for A records (address strings). That is what lets an
+    # `exists:` term (§5.7, always an A query) be evaluated. A resolver without
+    # it is not wrong, only TXT-only: `exists:` then costs budget and matches
+    # nothing, as before `#a` existed.
+    #
     # A plain lambda satisfies the contract, which is how the test suite runs
     # with no network at all:
     #
@@ -40,13 +46,23 @@ module MailerToGo
       end
 
       def call(name)
+        resources(name, ::Resolv::DNS::Resource::IN::TXT)&.map { |r| r.strings.join }
+      end
+
+      def a(name)
+        resources(name, ::Resolv::DNS::Resource::IN::A)&.map { |r| r.address.to_s }
+      end
+
+      private
+
+      def resources(name, type)
         query = Record.normalize_name(name)
         return [] if query.empty?
 
         dns = @nameservers ? ::Resolv::DNS.new(nameserver: Array(@nameservers)) : ::Resolv::DNS.new
         dns.timeouts = @timeout
         begin
-          dns.getresources(query, ::Resolv::DNS::Resource::IN::TXT).map { |r| r.strings.join }
+          dns.getresources(query, type)
         ensure
           dns.close
         end
@@ -79,18 +95,36 @@ module MailerToGo
       end
 
       def call(name)
-        key = Record.normalize_name(name)
-        now = @clock.call
-        cached = @mutex.synchronize { @entries[key] }
-        return cached[1] if cached && cached[0] > now
+        fetch(Record.normalize_name(name)) { |key| @resolver.call(key) }
+      end
 
-        answer = @resolver.call(key)
-        @mutex.synchronize { @entries[key] = [now + @ttl, answer] } unless answer.nil?
-        answer
+      def a(name)
+        key = Record.normalize_name(name)
+        fetch("A #{key}") { @resolver.a(key) }
+      end
+
+      # Answers A queries only when the resolver it wraps can, so wrapping a
+      # TXT-only resolver changes nothing about what `exists:` does.
+      def respond_to?(name, include_all = false) # rubocop:disable Style/OptionalBooleanParameter -- Object#respond_to? signature
+        return @resolver.respond_to?(:a) if name.to_sym == :a
+
+        super
       end
 
       def clear
         @mutex.synchronize { @entries.clear }
+      end
+
+      private
+
+      def fetch(key)
+        now = @clock.call
+        cached = @mutex.synchronize { @entries[key] }
+        return cached[1] if cached && cached[0] > now
+
+        answer = yield key
+        @mutex.synchronize { @entries[key] = [now + @ttl, answer] } unless answer.nil?
+        answer
       end
     end
   end

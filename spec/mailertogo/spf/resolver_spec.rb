@@ -34,6 +34,23 @@ RSpec.describe MailerToGo::SPF::CachingResolver do
 
     expect(inner.calls).to eq(2)
   end
+
+  it "caches A answers apart from TXT, and never caches an A failure" do
+    a_calls = 0
+    inner = CountingResolver.new("example.com" => ["v=spf1 ~all"])
+    inner.define_singleton_method(:a) do |name|
+      a_calls += 1
+      name == "example.com" ? ["192.0.2.1"] : nil
+    end
+    caching = described_class.new(inner, ttl: 60)
+
+    2.times { expect(caching.a("example.com")).to eq(["192.0.2.1"]) }
+    2.times { expect(caching.a("flaky.example")).to be_nil }
+    expect(caching.call("example.com")).to eq(["v=spf1 ~all"])
+
+    expect(a_calls).to eq(3)
+    expect(inner.calls).to eq(1)
+  end
 end
 
 RSpec.describe MailerToGo::SPF::Resolver do

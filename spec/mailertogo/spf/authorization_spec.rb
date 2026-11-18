@@ -448,4 +448,125 @@ RSpec.describe MailerToGo::SPF::Authorization do
       expect(r.lookups).to eq(2)
     end
   end
+
+  # Hosted SPF: the customer publishes one include per account, and that record
+  # answers per connecting address against the provider's own zone, so our
+  # include is never named anywhere. Receivers pass us; the gem must too, when
+  # its resolver can answer the A query an `exists:` makes (§5.7).
+  describe "exists: with a %{i} macro" do
+    # The representative address of each sending net in SENDER_ZONE: a single
+    # address is itself, a range is its first host.
+    let(:ours) { %w[192.0.2.10 192.0.2.11 192.0.2.129] }
+    let(:hosted) do
+      {
+        "example.com" => ["v=spf1 include:abc123.powerspf.com ~all"],
+        "abc123.powerspf.com" => [
+          "v=spf1 exists:%{i}.abc123.macrospf.powerspf.com exists:%{i}._spf.mta.salesforce.com ~all",
+        ],
+      }
+    end
+
+    def answers(names) = names.to_h { |name| [name, ["198.51.100.1"]] }
+
+    it "passes a hosted-SPF record that answers for every one of our addresses" do
+      resolver = resolver_with_a(hosted, answers(ours.map { |ip| "#{ip}.abc123.macrospf.powerspf.com" }))
+      r = MailerToGo::SPF.authorize("example.com", resolver: resolver)
+
+      expect(r.status).to eq(:pass)
+      expect(r.matched).to eq("%{i}.abc123.macrospf.powerspf.com")
+      expect(r.lookups).to eq(2) # the include and the first exists — one lookup however many addresses we ask about
+      expect(r.partial?).to be(false)
+      expect(r.detail).to eq("SPF authorizes _spf.mailertogo.net's sending addresses through " \
+                             "exists:%{i}.abc123.macrospf.powerspf.com (2 DNS lookups)")
+      expect(MailerToGo::SPF.merge_plan("example.com", resolver: resolver).action).to eq(:satisfied)
+    end
+
+    it "fails when the A query has no answer for our addresses" do
+      r = MailerToGo::SPF.authorize("example.com", resolver: resolver_with_a(hosted, {}))
+
+      expect(r.status).to eq(:fail)
+      expect(r.matched).to be_nil
+      expect(r.lookups).to eq(3)
+    end
+
+    it "fails when it answers for only some of our addresses — that mail does not pass" do
+      resolver = resolver_with_a(hosted, answers(["192.0.2.10.abc123.macrospf.powerspf.com"]))
+
+      expect(MailerToGo::SPF.authorize("example.com", resolver: resolver).status).to eq(:fail)
+    end
+
+    it "passes when two exists: terms between them cover all of our addresses" do
+      resolver = resolver_with_a(hosted, answers([
+        "192.0.2.10.abc123.macrospf.powerspf.com",
+        "192.0.2.11._spf.mta.salesforce.com",
+        "192.0.2.129._spf.mta.salesforce.com",
+      ]))
+      r = MailerToGo::SPF.authorize("example.com", resolver: resolver)
+
+      expect(r.status).to eq(:pass)
+      expect(r.lookups).to eq(3) # where the last address was settled
+    end
+
+    it "returns :unknown, never :fail, when an A lookup fails" do
+      a_zone = answers(ours.map { |ip| "#{ip}.abc123.macrospf.powerspf.com" })
+      a_zone["192.0.2.11.abc123.macrospf.powerspf.com"] = nil
+      r = MailerToGo::SPF.authorize("example.com", resolver: resolver_with_a(hosted, a_zone))
+
+      expect(r.status).to eq(:unknown)
+      expect(r.partial?).to be(true)
+    end
+
+    it "expands the r transformer, %{v} and %{d}" do
+      zone = { "example.com" => ["v=spf1 include:spf.example.net -all"],
+               "spf.example.net" => ["v=spf1 exists:%{ir}.%{v}.%{d} -all"], }
+      a_zone = answers(%w[10.2.0.192 11.2.0.192 129.2.0.192].map { |ip| "#{ip}.in-addr.spf.example.net" })
+
+      expect(MailerToGo::SPF.authorize("example.com", resolver: resolver_with_a(zone, a_zone)).status).to eq(:pass)
+    end
+
+    it "leaves a macro that needs a message unevaluated, exactly as before" do
+      zone = { "example.com" => ["v=spf1 exists:%{i}.%{l}.spf.example.net ~all"] }
+      asked = []
+      resolver = resolver_with_a(zone, {})
+      resolver.define_singleton_method(:a) do |name|
+        asked << name
+        ["198.51.100.1"]
+      end
+      r = MailerToGo::SPF.authorize("example.com", resolver: resolver)
+
+      expect(r.status).to eq(:fail)
+      expect(r.lookups).to eq(1)
+      expect(asked).to be_empty
+    end
+
+    it "does not count an exists: without %{i}, which answers the same for every sender" do
+      zone = { "example.com" => ["v=spf1 exists:always.example.net ~all"] }
+      r = MailerToGo::SPF.authorize("example.com", resolver: resolver_with_a(zone, answers(["always.example.net"])))
+
+      expect(r.status).to eq(:fail)
+    end
+
+    it "does not read a -exists: match as authorization" do
+      zone = { "example.com" => ["v=spf1 -exists:%{i}.block.example.net ~all"] }
+      a_zone = answers(ours.map { |ip| "#{ip}.block.example.net" })
+
+      expect(MailerToGo::SPF.authorize("example.com", resolver: resolver_with_a(zone, a_zone)).status).to eq(:fail)
+    end
+
+    it "changes nothing for a TXT-only resolver" do
+      r = authorize(hosted)
+
+      expect(r.status).to eq(:fail)
+      expect(r.lookups).to eq(3)
+      expect(r.detail).to match(/does not authorize _spf\.mailertogo\.net/)
+    end
+
+    it "evaluates through a CachingResolver only when the wrapped resolver can answer A queries" do
+      resolver = resolver_with_a(hosted, answers(ours.map { |ip| "#{ip}.abc123.macrospf.powerspf.com" }))
+      caching = MailerToGo::SPF::CachingResolver.new(resolver)
+
+      expect(MailerToGo::SPF.authorize("example.com", resolver: caching).status).to eq(:pass)
+      expect(MailerToGo::SPF::CachingResolver.new(resolver_for(hosted)).respond_to?(:a)).to be(false)
+    end
+  end
 end

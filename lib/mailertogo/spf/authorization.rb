@@ -5,6 +5,7 @@ require "mailertogo/spf/record"
 require "mailertogo/spf/term"
 require "mailertogo/spf/result"
 require "mailertogo/spf/sender"
+require "mailertogo/spf/macro"
 
 module MailerToGo
   module SPF
@@ -24,7 +25,9 @@ module MailerToGo
     # failure, and anything gated on the answer — verification state, drift
     # alerts, the ability to send — goes wrong with it. So we RESOLVE the chain:
     # follow `include:` (and the `redirect=` modifier) until we reach a name the
-    # sender owns, or an ip4/ip6 mechanism covering the sender's addresses.
+    # sender owns, or an ip4/ip6 mechanism covering the sender's addresses —
+    # or, with a resolver that answers A queries, an `exists:` that says yes
+    # to the sender's addresses (see #exists!).
     #
     # RFC 7208 §4.6.4 caps an evaluation at 10 DNS-querying mechanisms; past
     # that a receiver returns PERMERROR and the record does NOT pass. We enforce
@@ -106,6 +109,8 @@ module MailerToGo
         @ip_coverage = nil
         @ip_match_at = nil
         @all_qualifier = nil
+        @matched_exists = nil
+        @exists_pending = nil
       end
 
       def run
@@ -126,7 +131,7 @@ module MailerToGo
         record = records.first
         return failure("No v=spf1 record on #{@host}") if record.nil?
 
-        walk(record, depth: 0, authoritative: true)
+        walk(record, depth: 0, domain: @host, authoritative: true)
         match_by_ip! if @match_at.nil?
 
         # Over budget beats everything: receivers PERMERROR such a record, so it
@@ -178,7 +183,9 @@ module MailerToGo
       # `authoritative` marks the records whose `all` decides the domain's
       # answer — the apex and anything it redirect=s to, never an include's (an
       # included record's `all` never leaves that include, §5.2).
-      def walk(record, depth:, authoritative: false)
+      #
+      # `domain` is the name the record was published at: %{d} (§7.2).
+      def walk(record, depth:, domain:, authoritative: false)
         terms = Record.terms(record)
         note_sender_names(terms, depth)
         redirect = nil
@@ -218,6 +225,10 @@ module MailerToGo
               # a sending service publishes an include target, never an a/mx
               # mechanism a customer would borrow.
               @lookups += 1
+              # A `+exists:` can still authorize the sender's ADDRESSES. Any
+              # other qualifier would end evaluation with a non-pass, which
+              # this walk does not model for any mechanism.
+              exists!(t.split(":", 2).last, domain, depth) if mechanism == "exists" && [nil, "+"].include?(qualifier)
             end
           end
         end
@@ -255,10 +266,7 @@ module MailerToGo
         return if name.empty?
 
         if @sender.covers?(name)
-          if @matched.nil?
-            @matched = name
-            @matched_directly = depth.zero?
-          end
+          first_match(name, depth)
           # The mechanism that ended the evaluation, and the budget it had spent
           # by then — the only count §4.6.4 measures.
           @match_at = @lookups
@@ -287,7 +295,67 @@ module MailerToGo
 
         return if records.first.nil?
 
-        walk(records.first, depth: depth + 1, authoritative: authoritative)
+        walk(records.first, depth: depth + 1, domain: name, authoritative: authoritative)
+      end
+
+      # An `exists:` whose name expands %{i} asks DNS "is THIS address allowed?".
+      # Hosted-SPF services work that way: the customer publishes one include
+      # per account, and that record answers per address against the service's
+      # own zone, so the sender is never named anywhere (§5.7, §7):
+      #
+      #   example.com           TXT  v=spf1 include:abc123.powerspf.com ~all
+      #   abc123.powerspf.com   TXT  v=spf1 exists:%{i}.abc123.macrospf.powerspf.com ~all
+      #
+      # We ask it about our own addresses, as a receiver would for mail from us.
+      #
+      # ALL of them, not any: mail leaves from every one of our nets, and a
+      # record that passes only some of it is not an authorization. Each
+      # address is settled by the first exists: that answers for it (§4.6.2
+      # stops there), so two terms that each cover half our nets still
+      # authorize us, and the match lands where the LAST address is settled —
+      # the most budget any one of our messages spends.
+      #
+      # Only %{i} makes a term about us; one with no %{i} answers the same for
+      # every sender. A macro that needs a message (%{s}, %{l}, %{h}, …) cannot
+      # be expanded, and the term is left exactly as before: counted, unmatched.
+      # A failed A lookup marks the walk partial, so it can end :unknown but
+      # never :fail.
+      def exists!(spec, domain, depth)
+        return unless @lookup.respond_to?(:a) && Macro.per_address?(spec)
+
+        pending = (@exists_pending ||= our_nets.map { |net| representative(net) })
+        names = pending.map { |ip| Macro.expand(spec, address: ip, domain: domain, sender_domain: @host) }
+        return if pending.empty? || names.include?(nil)
+
+        answers = names.map { |name| @lookup.a(name) }
+        @dns_error = true if answers.include?(nil)
+        @exists_pending = pending.zip(answers).select { |_ip, answer| Array(answer).empty? }.map(&:first)
+        return unless @exists_pending.empty?
+
+        first_match(spec, depth)
+        @matched_exists = spec
+        @match_at = @lookups
+      end
+
+      # One address to stand for a sending net when expanding %{i}: its first
+      # host. A receiver only ever sees a host address, and a network address
+      # never connects to anyone. A /32 (/128) is its own address, and a /31
+      # (/127) reserves nothing (RFC 3021), so its first address is a host.
+      def representative(net)
+        host_bits = (net.ipv4? ? 32 : 128) - net.prefix
+        IPAddr.new(net.to_i + (host_bits > 1 ? 1 : 0), net.family)
+      end
+
+      # The sender's nets, read once per evaluation and shared by the exists:
+      # and pinned checks.
+      def our_nets = @our_nets ||= self.class.sending_nets(@sender, @lookup)
+
+      # `matched` reports the FIRST name in the record that meant us.
+      def first_match(name, depth)
+        return unless @matched.nil?
+
+        @matched = name
+        @matched_directly = depth.zero?
       end
 
       # [records_array, error_or_nil] — error is :error when DNS itself failed.
@@ -312,7 +380,7 @@ module MailerToGo
       def match_by_ip!
         return if @customer_nets.empty?
 
-        ours = self.class.sending_nets(@sender, @lookup)
+        ours = our_nets
         return if ours.empty?
 
         # "Covered" = the customer's term authorizes one of the sender's ranges
@@ -341,7 +409,10 @@ module MailerToGo
       end
 
       def pass
-        detail = if @matched_directly
+        detail = if @matched_exists
+                   "SPF authorizes #{@want}'s sending addresses through exists:#{@matched_exists} " \
+                     "(#{pluralize(@lookups, "DNS lookup")})"
+                 elsif @matched_directly
                    "SPF includes #{@matched}"
                  else
                    "SPF reaches #{@matched} through its include chain (#{pluralize(@lookups, "DNS lookup")})"
